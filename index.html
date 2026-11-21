@@ -167,6 +167,18 @@ renderer.setAnimationLoop(() => {
       m.position.z = Math.min(-0.05, m.position.z + gp.axes[3] * 0.03);
     }
   }
+  // A or X: touch controller to the real floor and press to set floor height
+  for (const c of ctrls) {
+    const gp = c.userData.src && c.userData.src.gamepad;
+    const down = !!(gp && gp.buttons[4] && gp.buttons[4].pressed);
+    if (down && !c.userData.aWas) {
+      const y = new THREE.Vector3().setFromMatrixPosition(c.matrixWorld).y;
+      const dy = y - floor.position.y;
+      floor.position.y = y;
+      models.forEach(m => m.position.y += dy);
+    }
+    c.userData.aWas = down;
+  }
   renderer.render(scene, camera);
 });
 
