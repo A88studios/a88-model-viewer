@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Action 88 — Model Viewer</title>
+<style>
+  body { margin:0; background:#111; color:#eee; font-family:system-ui, sans-serif; overflow:hidden; }
+  #ui { position:fixed; top:12px; left:12px; z-index:10; background:rgba(0,0,0,.7); padding:12px 16px; border-radius:12px; max-width:340px; font-size:14px; }
+  #ui label { display:inline-block; background:#ff3b3b; color:#fff; padding:10px 16px; border-radius:999px; font-weight:bold; cursor:pointer; }
+  #ui input { display:none; }
+  #ui p { margin:8px 0 0; color:#bbb; }
+  #ui button { margin-top:8px; background:#333; color:#fff; border:none; padding:8px 14px; border-radius:999px; cursor:pointer; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="ui">
+  <label>Load .glb models<input type="file" id="file" accept=".glb,.gltf" multiple></label>
+  <button id="clear">Clear all</button>
+  <p id="status">Load one or more models, then tap Enter VR or Start AR.</p>
+  <p>In headset: aim and hold <b>trigger or grip</b> to grab, then move and twist your hand to place and rotate. Grab with the <b>other hand too</b> and pull apart or together to scale. <b>Thumbstick up/down</b> while holding pushes the model away or pulls it closer.</p>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+import { ARButton } from 'three/addons/webxr/ARButton.js';
+import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+
+const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(devicePixelRatio);
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor');
+document.body.appendChild(renderer.domElement);
+document.body.appendChild(VRButton.createButton(renderer));
+const arBtn = ARButton.createButton(renderer);
+arBtn.style.bottom = '70px';
+document.body.appendChild(arBtn);
+
+const scene = new THREE.Scene();
+const bg = new THREE.Color(0x1a1a22);
+scene.background = bg;
+const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.01, 200);
+camera.position.set(0, 1.5, 1);
+const orbit = new OrbitControls(camera, renderer.domElement);
+orbit.target.set(0, 1.2, -1);
+orbit.update();
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x444455, 2));
+const sun = new THREE.DirectionalLight(0xffffff, 2);
+sun.position.set(3, 6, 2);
+scene.add(sun);
+const floor = new THREE.GridHelper(20, 40, 0xff3b3b, 0x333344);
+scene.add(floor);
+
+renderer.xr.addEventListener('sessionstart', () => {
+  const ar = renderer.xr.getSession().environmentBlendMode !== 'opaque';
+  scene.background = ar ? null : bg;
+  floor.visible = !ar;
+});
+renderer.xr.addEventListener('sessionend', () => { scene.background = bg; floor.visible = true; });
+
+const models = [];
+const loader = new GLTFLoader();
+const status = document.getElementById('status');
+
+document.getElementById('file').addEventListener('change', e => {
+  for (const f of e.target.files) {
+    status.textContent = 'Loading ' + f.name + '...';
+    const url = URL.createObjectURL(f);
+    loader.load(url, gltf => { addModel(gltf.scene); status.textContent = 'Loaded ' + f.name + ' (' + models.length + ' in scene)'; },
+      undefined, () => { status.textContent = 'Could not load ' + f.name + '. Use the GLB format.'; });
+  }
+  e.target.value = '';
+});
+
+function addModel(obj) {
+  const box = new THREE.Box3().setFromObject(obj);
+  const size = box.getSize(new THREE.Vector3()).length() || 1;
+  const center = box.getCenter(new THREE.Vector3());
+  obj.position.copy(center).multiplyScalar(-1);
+  const wrap = new THREE.Group();
+  wrap.add(obj);
+  wrap.scale.setScalar(0.6 / size);
+  const n = models.length;
+  wrap.position.set((n % 3 - 1) * 0.8, 1.2, -1.2 - Math.floor(n / 3) * 0.8);
+  scene.add(wrap);
+  models.push(wrap);
+}
+
+document.getElementById('clear').onclick = () => {
+  models.forEach(m => m.removeFromParent());
+  models.length = 0;
+  status.textContent = 'Cleared.';
+};
+
+const ray = new THREE.Raycaster();
+const tmpMat = new THREE.Matrix4();
+const factory = new XRControllerModelFactory();
+const ctrls = [];
+let scaling = null;
+
+for (let i = 0; i < 2; i++) {
+  const c = renderer.xr.getController(i);
+  c.userData.held = null;
+  c.addEventListener('connected', e => c.userData.src = e.data);
+  c.addEventListener('selectstart', () => press(c));
+  c.addEventListener('squeezestart', () => press(c));
+  c.addEventListener('selectend', () => release(c));
+  c.addEventListener('squeezeend', () => release(c));
+  const line = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, 0, -1)]),
+    new THREE.LineBasicMaterial({ color: 0xff8a00 }));
+  line.scale.z = 5;
+  c.add(line);
+  scene.add(c);
+  const grip = renderer.xr.getControllerGrip(i);
+  grip.add(factory.createControllerModel(grip));
+  scene.add(grip);
+  ctrls.push(c);
+}
+
+function topModel(o) { while (o && !models.includes(o)) o = o.parent; return o; }
+
+function press(c) {
+  if (c.userData.held) return;
+  const other = ctrls.find(o => o !== c);
+  if (other.userData.held) {
+    scaling = { obj: other.userData.held,
+      startDist: c.position.distanceTo(other.position),
+      startScale: other.userData.held.scale.x, hand: c };
+    return;
+  }
+  tmpMat.identity().extractRotation(c.matrixWorld);
+  ray.ray.origin.setFromMatrixPosition(c.matrixWorld);
+  ray.ray.direction.set(0, 0, -1).applyMatrix4(tmpMat);
+  const hit = ray.intersectObjects(models, true)[0];
+  if (hit) {
+    const m = topModel(hit.object);
+    c.attach(m);
+    c.userData.held = m;
+  }
+}
+
+function release(c) {
+  if (scaling && (scaling.hand === c || c.userData.held === scaling.obj)) scaling = null;
+  if (c.userData.held) { scene.attach(c.userData.held); c.userData.held = null; }
+}
+
+renderer.setAnimationLoop(() => {
+  if (scaling) {
+    const d = ctrls[0].position.distanceTo(ctrls[1].position);
+    scaling.obj.scale.setScalar(Math.max(0.001, scaling.startScale * d / scaling.startDist));
+  }
+  for (const c of ctrls) {
+    const m = c.userData.held, gp = c.userData.src && c.userData.src.gamepad;
+    if (m && gp && gp.axes.length >= 4 && Math.abs(gp.axes[3]) > 0.15) {
+      m.position.z = Math.min(-0.05, m.position.z + gp.axes[3] * 0.03);
+    }
+  }
+  renderer.render(scene, camera);
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
